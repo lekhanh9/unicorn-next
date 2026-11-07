@@ -49,15 +49,10 @@
  *    - EC == 0x24 or 0x25: Data Abort (write) -> switch buffer to PROT_READ | PROT_WRITE
  *    This allows seamless dynamic translation and JIT execution on iOS 16+.
  */
-#define MAX_TCG_BUFFERS 16
-static struct {
-    uintptr_t base;
-    size_t size;
-} g_tcg_buffers[MAX_TCG_BUFFERS];
-static size_t g_num_tcg_buffers = 0;
-static struct sigaction g_prev_sigbus;
+#include <mach/mach.h>
+#include <libkern/OSCacheControl.h>
 
-static void *(*g_real_mmap)(void *, size_t, int, int, int, off_t) = NULL;
+static struct sigaction g_prev_sigbus;
 static bool g_unicorn_compat_initialized = false;
 
 static void unicorn_sigbus_handler(int sig, siginfo_t *info, void *ucontext_raw) {
@@ -66,18 +61,27 @@ static void unicorn_sigbus_handler(int sig, siginfo_t *info, void *ucontext_raw)
     uint32_t ec = (esr >> 26) & 0x3f;
     uintptr_t fault_addr = (uintptr_t)info->si_addr;
 
-    for (size_t i = 0; i < g_num_tcg_buffers; i++) {
-        uintptr_t base = g_tcg_buffers[i].base;
-        size_t size = g_tcg_buffers[i].size;
-        if (fault_addr >= base && fault_addr < base + size) {
+    if (ec == 0x20 || ec == 0x21 || ec == 0x24 || ec == 0x25) {
+        mach_port_t task = mach_task_self();
+        vm_address_t region_addr = (vm_address_t)fault_addr;
+        vm_size_t region_size = 0;
+        vm_region_basic_info_data_64_t vminfo;
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t object_name;
+
+        kern_return_t kr = vm_region_64(task, &region_addr, &region_size,
+                                        VM_REGION_BASIC_INFO_64,
+                                        (vm_region_info_t)&vminfo, &count,
+                                        &object_name);
+        if (kr == KERN_SUCCESS && fault_addr >= region_addr && fault_addr < region_addr + region_size) {
             if (ec == 0x20 || ec == 0x21) {
                 /* Instruction Abort -> page must be executable (R-X) */
-                mprotect((void *)base, size, PROT_READ | PROT_EXEC);
-                sys_icache_invalidate((void *)base, size);
+                mprotect((void *)region_addr, region_size, PROT_READ | PROT_EXEC);
+                sys_icache_invalidate((void *)region_addr, region_size);
                 return;
             } else if (ec == 0x24 || ec == 0x25) {
                 /* Data Abort -> page must be writable (RW-) */
-                mprotect((void *)base, size, PROT_READ | PROT_WRITE);
+                mprotect((void *)region_addr, region_size, PROT_READ | PROT_WRITE);
                 return;
             }
         }
@@ -97,28 +101,6 @@ static void unicorn_sigbus_handler(int sig, siginfo_t *info, void *ucontext_raw)
     }
 }
 
-static void *unicorn_compat_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t offset) {
-    if (!g_real_mmap) {
-        g_real_mmap = (void *(*)(void *, size_t, int, int, int, off_t))dlsym(RTLD_DEFAULT, "mmap");
-    }
-
-    int is_jit = (flags & 0x800);
-    if (is_jit) { /* Strip MAP_JIT */
-        flags &= ~0x800;
-    }
-
-    void *ret = g_real_mmap(addr, len, prot, flags, fd, offset);
-    if (ret != MAP_FAILED && is_jit) {
-        if (g_num_tcg_buffers < MAX_TCG_BUFFERS) {
-            g_tcg_buffers[g_num_tcg_buffers].base = (uintptr_t)ret;
-            g_tcg_buffers[g_num_tcg_buffers].size = len;
-            g_num_tcg_buffers++;
-        }
-    }
-
-    return ret;
-}
-
 void macho_init_unicorn_compat(void) {
     if (g_unicorn_compat_initialized) return;
     g_unicorn_compat_initialized = true;
@@ -130,35 +112,6 @@ void macho_init_unicorn_compat(void) {
     sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGBUS, &sa, &g_prev_sigbus);
-
-    g_real_mmap = (void *(*)(void *, size_t, int, int, int, off_t))dlsym(RTLD_DEFAULT, "mmap");
-    if (!g_real_mmap) return;
-
-    /* Find base of libunicorn */
-    uint32_t count = _dyld_image_count();
-    uintptr_t uc_base = 0;
-    for (uint32_t i = 0; i < count; i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (name && strstr(name, "libunicorn")) {
-            uc_base = (uintptr_t)_dyld_get_image_header(i);
-            break;
-        }
-    }
-
-    if (!uc_base) return;
-
-    /* Offset of mmap GOT pointer in Procursus libunicorn.2.dylib */
-    uintptr_t *got_entry = (uintptr_t *)(uc_base + 0xf60158);
-
-    /* Verify that the GOT entry currently points to real mmap before patching */
-    if (*got_entry == (uintptr_t)g_real_mmap) {
-        uintptr_t page = (uintptr_t)got_entry & ~0x3fffULL; /* 16KB page alignment */
-        kern_return_t kr = vm_protect(mach_task_self(), (vm_address_t)page, 0x4000, FALSE,
-                                      VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-        if (kr == KERN_SUCCESS) {
-            *got_entry = (uintptr_t)&unicorn_compat_mmap;
-        }
-    }
 }
 
 /* Endianness swapping helpers */
