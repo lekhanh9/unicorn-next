@@ -8,16 +8,8 @@ on:
 
 jobs:
   extract:
-    name: Extract on ${{ matrix.os }} (${{ matrix.arch }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-13
-            arch: x86_64
-          - os: macos-14
-            arch: arm64
+    name: Extract on macos-latest
+    runs-on: macos-latest
 
     steps:
       - name: Checkout repository
@@ -85,6 +77,6 @@ jobs:
       - name: Upload ADI Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: adi-binaries-${{ matrix.os }}-${{ matrix.arch }}
+          name: adi-binaries-macos-latest
           path: extracted/
           if-no-files-found: warn
