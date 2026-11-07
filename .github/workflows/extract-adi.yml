@@ -17,20 +17,13 @@ jobs:
         run: |
           brew install blacktop/tap/ipsw
 
-      - name: Locate dyld_shared_cache
-        id: locate-dsc
-        run: |
-          echo "Searching for dyld_shared_cache..."
-          DSC=$(find /System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld /System/Library/dyld -name "dyld_shared_cache_*" 2>/dev/null | grep -v "\.symbols" | head -n 1 || true)
-          if [ -z "$DSC" ]; then
-            DSC=$(find / -name "dyld_shared_cache_*" 2>/dev/null | grep -v "\.symbols" | head -n 1 || true)
-          fi
-          echo "Found dyld_shared_cache: $DSC"
-          echo "dsc_path=$DSC" >> "$GITHUB_OUTPUT"
-
       - name: Extract ADI binaries from dyld_shared_cache and filesystem
         run: |
           mkdir -p extracted
+
+          echo "=== CLI Help ==="
+          ipsw dyld --help || true
+          ipsw dyld extract --help || true
 
           # 1. Search filesystem for standalone dylibs / frameworks
           echo "=== Searching filesystem for standalone ADI files ==="
@@ -52,20 +45,43 @@ jobs:
             done
           fi
 
-          # 3. Extract from dyld_shared_cache using ipsw
-          DSC="${{ steps.locate-dsc.outputs.dsc_path }}"
-          if [ -n "$DSC" ] && [ -f "$DSC" ]; then
-            echo "=== Searching and extracting from dyld_shared_cache ($DSC) ==="
-            MATCHES=$(ipsw dyld list "$DSC" | grep -iE "adi|appledeviceidentity" || true)
-            echo "Matched dylibs in cache:"
-            echo "$MATCHES"
-            for lib in $MATCHES; do
-              echo "Extracting: $lib"
-              ipsw dyld extract "$DSC" "$lib" -o extracted || true
-            done
-          else
-            echo "Warning: dyld_shared_cache not found!"
-          fi
+          # 3. Locate and extract from dyld_shared_cache
+          echo "=== Locating dyld_shared_cache files ==="
+          CACHES=()
+          PRESETS=(
+            "/System/Library/dyld/dyld_shared_cache_arm64e"
+            "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e"
+            "/System/Library/dyld/dyld_shared_cache_x86_64"
+          )
+          for p in "${PRESETS[@]}"; do
+            if [ -f "$p" ]; then
+              CACHES+=("$p")
+            fi
+          done
+
+          FOUND_CACHES=$(find /System/Library/dyld /System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld -name "dyld_shared_cache_*" 2>/dev/null | grep -vE "\.(symbols|atlas|map)$" || true)
+          for f in $FOUND_CACHES; do
+            if [ -f "$f" ]; then
+              if [[ ! " ${CACHES[*]} " =~ " ${f} " ]]; then
+                CACHES+=("$f")
+              fi
+            fi
+          done
+
+          echo "Found valid cache files:"
+          for cache in "${CACHES[@]}"; do
+            echo " - $cache"
+          done
+
+          for cache in "${CACHES[@]}"; do
+            echo "=== Extracting from $cache ==="
+            ipsw dyld extract "$cache" ".*CoreADI.*" -o extracted || true
+            ipsw dyld extract "$cache" ".*libadi.*" -o extracted || true
+            ipsw dyld extract "$cache" ".*AppleDeviceIdentity.*" -o extracted || true
+            ipsw dyld extract "$cache" --dylib ".*CoreADI.*" -o extracted || true
+            ipsw dyld extract "$cache" --dylib ".*libadi.*" -o extracted || true
+            ipsw dyld extract "$cache" --dylib ".*AppleDeviceIdentity.*" -o extracted || true
+          done
 
           # 4. Flatten extracted directory if ipsw created subdirectories
           find extracted -mindepth 2 -type f -exec cp -v {} extracted/ \; 2>/dev/null || true
