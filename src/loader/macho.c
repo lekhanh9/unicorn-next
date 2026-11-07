@@ -12,6 +12,8 @@
 #include <mach-o/loader.h>
 #include <mach-o/fat.h>
 #include <mach-o/nlist.h>
+#include <signal.h>
+#include <libkern/OSCacheControl.h>
 
 /* Fallback definitions for modern Mach-O constants */
 #ifndef CPU_TYPE_ARM64
@@ -36,29 +38,98 @@
 
 /*
  * iOS Unicorn Compatibility Patch:
- * In pre-compiled libunicorn builds on iOS, the dynamic translator buffer allocation
- * requests MAP_JIT (0x800). On iOS 16+, unless CS_DEBUGGED is granted, the kernel rejects
- * MAP_JIT with EINVAL (22). We intercept mmap in libunicorn to strip MAP_JIT, allowing
- * Unicorn's TCG engine to allocate its execution buffer smoothly.
+ * 1. In pre-compiled libunicorn builds on iOS, the dynamic translator buffer allocation
+ *    requests MAP_JIT (0x800). On iOS 16+, unless CS_DEBUGGED is granted, the kernel rejects
+ *    MAP_JIT with EINVAL (22). We intercept mmap in libunicorn to strip MAP_JIT.
+ * 2. On iOS hardened memory (W^X), memory cannot be simultaneously writable and executable.
+ *    Stripping MAP_JIT causes mmap(PROT_READ|PROT_WRITE|PROT_EXEC) to allocate as RW-.
+ *    When Unicorn jumps into the TCG code buffer, an Instruction Abort (Permission fault)
+ *    is triggered (SIGBUS). We intercept SIGBUS, inspect the ARM64 ESR Exception Class (EC):
+ *    - EC == 0x20 or 0x21: Instruction Abort -> switch buffer to PROT_READ | PROT_EXEC
+ *    - EC == 0x24 or 0x25: Data Abort (write) -> switch buffer to PROT_READ | PROT_WRITE
+ *    This allows seamless dynamic translation and JIT execution on iOS 16+.
  */
+#define MAX_TCG_BUFFERS 16
+static struct {
+    uintptr_t base;
+    size_t size;
+} g_tcg_buffers[MAX_TCG_BUFFERS];
+static size_t g_num_tcg_buffers = 0;
+static struct sigaction g_prev_sigbus;
+
 static void *(*g_real_mmap)(void *, size_t, int, int, int, off_t) = NULL;
 static bool g_unicorn_compat_initialized = false;
+
+static void unicorn_sigbus_handler(int sig, siginfo_t *info, void *ucontext_raw) {
+    ucontext_t *uc = (ucontext_t *)ucontext_raw;
+    uint32_t esr = uc->uc_mcontext->__es.__esr;
+    uint32_t ec = (esr >> 26) & 0x3f;
+    uintptr_t fault_addr = (uintptr_t)info->si_addr;
+
+    for (size_t i = 0; i < g_num_tcg_buffers; i++) {
+        uintptr_t base = g_tcg_buffers[i].base;
+        size_t size = g_tcg_buffers[i].size;
+        if (fault_addr >= base && fault_addr < base + size) {
+            if (ec == 0x20 || ec == 0x21) {
+                /* Instruction Abort -> page must be executable (R-X) */
+                mprotect((void *)base, size, PROT_READ | PROT_EXEC);
+                sys_icache_invalidate((void *)base, size);
+                return;
+            } else if (ec == 0x24 || ec == 0x25) {
+                /* Data Abort -> page must be writable (RW-) */
+                mprotect((void *)base, size, PROT_READ | PROT_WRITE);
+                return;
+            }
+        }
+    }
+
+    /* Fallback to previous handler if not handled */
+    if (g_prev_sigbus.sa_flags & SA_SIGINFO) {
+        if (g_prev_sigbus.sa_sigaction) {
+            g_prev_sigbus.sa_sigaction(sig, info, ucontext_raw);
+            return;
+        }
+    } else if (g_prev_sigbus.sa_handler == SIG_DFL) {
+        signal(sig, SIG_DFL);
+        raise(sig);
+    } else if (g_prev_sigbus.sa_handler != SIG_IGN) {
+        g_prev_sigbus.sa_handler(sig);
+    }
+}
 
 static void *unicorn_compat_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t offset) {
     if (!g_real_mmap) {
         g_real_mmap = (void *(*)(void *, size_t, int, int, int, off_t))dlsym(RTLD_DEFAULT, "mmap");
     }
 
-    if (flags & 0x800) { /* Strip MAP_JIT */
+    int is_jit = (flags & 0x800);
+    if (is_jit) { /* Strip MAP_JIT */
         flags &= ~0x800;
     }
 
-    return g_real_mmap(addr, len, prot, flags, fd, offset);
+    void *ret = g_real_mmap(addr, len, prot, flags, fd, offset);
+    if (ret != MAP_FAILED && is_jit) {
+        if (g_num_tcg_buffers < MAX_TCG_BUFFERS) {
+            g_tcg_buffers[g_num_tcg_buffers].base = (uintptr_t)ret;
+            g_tcg_buffers[g_num_tcg_buffers].size = len;
+            g_num_tcg_buffers++;
+        }
+    }
+
+    return ret;
 }
 
 void macho_init_unicorn_compat(void) {
     if (g_unicorn_compat_initialized) return;
     g_unicorn_compat_initialized = true;
+
+    /* Install SIGBUS handler for ARM64 W^X JIT switching */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = unicorn_sigbus_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGBUS, &sa, &g_prev_sigbus);
 
     g_real_mmap = (void *(*)(void *, size_t, int, int, int, off_t))dlsym(RTLD_DEFAULT, "mmap");
     if (!g_real_mmap) return;
