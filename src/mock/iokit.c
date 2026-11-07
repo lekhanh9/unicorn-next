@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <inttypes.h>
 
 #define GUEST_CFSTRING_FLAGS 0x07c8ULL
@@ -13,42 +14,202 @@
 static mac_hardware_profile_t g_active_profile;
 static bool g_profile_initialized = false;
 
-/* Pre-defined default MacBookPro18,1 profile (M1 Pro) */
-static const mac_hardware_profile_t s_default_macbook_profile = {
-    .model         = "MacBookPro18,1",
-    .serial_number = "C02G9012MD6R",
-    .platform_uuid = "1E5B70A2-9E28-48F5-8D63-B8756314D8B2",
-    .board_id      = "Mac-E43C1C25D4880AD6",
-    .rom           = "\x00\x3e\xe1\xc4\x89\xa0", /* 6-byte raw MAC */
-    .mlb           = "C021234567890123A",
-    .chip_id       = 0x8103ULL
+/*
+ * Table of genuine Apple Silicon Mac hardware models
+ */
+typedef struct mac_model_template {
+    const char *model;
+    const char *board_id;
+    uint64_t chip_id;
+    const char *serial_model_code;
+    const char *os_version;
+    const char *os_build;
+    const char *darwin_version;
+    const char *cfnetwork_version;
+    const char *xcode_version;
+} mac_model_template_t;
+
+static const mac_model_template_t s_mac_templates[] = {
+    {
+        .model             = "MacBookPro18,1",
+        .board_id          = "Mac-E43C1C25D4880AD6",
+        .chip_id           = 0x8103ULL,
+        .serial_model_code = "MD6R",
+        .os_version        = "13.5",
+        .os_build          = "22G90",
+        .darwin_version    = "22.6.0",
+        .cfnetwork_version = "1410.0.3",
+        .xcode_version     = "14.3.1"
+    },
+    {
+        .model             = "MacBookAir10,1",
+        .board_id          = "Mac-B4831CEBD52A0C4C",
+        .chip_id           = 0x8103ULL,
+        .serial_model_code = "Q6LR",
+        .os_version        = "13.5",
+        .os_build          = "22G90",
+        .darwin_version    = "22.6.0",
+        .cfnetwork_version = "1410.0.3",
+        .xcode_version     = "14.3.1"
+    },
+    {
+        .model             = "Macmini9,1",
+        .board_id          = "Mac-7BA5B2D9E42DDD94",
+        .chip_id           = 0x8103ULL,
+        .serial_model_code = "J5X6",
+        .os_version        = "13.5",
+        .os_build          = "22G90",
+        .darwin_version    = "22.6.0",
+        .cfnetwork_version = "1410.0.3",
+        .xcode_version     = "14.3.1"
+    },
+    {
+        .model             = "Mac14,2",
+        .board_id          = "Mac-5F9802EFE386AA28",
+        .chip_id           = 0x8112ULL,
+        .serial_model_code = "LK12",
+        .os_version        = "14.4.1",
+        .os_build          = "23E224",
+        .darwin_version    = "23.4.0",
+        .cfnetwork_version = "1494.0.7",
+        .xcode_version     = "15.3"
+    },
+    {
+        .model             = "Mac15,3",
+        .board_id          = "Mac-937CB26E2E02BB01",
+        .chip_id           = 0x8122ULL,
+        .serial_model_code = "N83K",
+        .os_version        = "14.5",
+        .os_build          = "23F79",
+        .darwin_version    = "23.5.0",
+        .cfnetwork_version = "1496.0.7",
+        .xcode_version     = "15.4"
+    }
 };
 
-const mac_hardware_profile_t *mock_iokit_get_default_profile(void) {
-    return &s_default_macbook_profile;
+#define NUM_TEMPLATES (sizeof(s_mac_templates) / sizeof(s_mac_templates[0]))
+
+/* Simple PRNG state based on seed */
+typedef struct {
+    uint64_t state;
+} prng_t;
+
+static inline uint32_t prng_next(prng_t *p) {
+    p->state = p->state * 6364136223846793005ULL + 1442695040888963407ULL;
+    return (uint32_t)(p->state >> 32);
+}
+
+static inline char prng_alphanum(prng_t *p) {
+    static const char charset[] = "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ"; // exclude I, O
+    return charset[prng_next(p) % (sizeof(charset) - 1)];
+}
+
+int mock_iokit_create_profile(mac_hardware_profile_t *out_profile, const char *seed) {
+    if (!out_profile) return -1;
+    memset(out_profile, 0, sizeof(mac_hardware_profile_t));
+
+    prng_t rng;
+    if (seed && seed[0] != '\0') {
+        /* FNV-1a 64-bit hash of seed */
+        uint64_t h = 0xcbf29ce484222325ULL;
+        for (const char *s = seed; *s; s++) {
+            h ^= (uint64_t)(unsigned char)*s;
+            h *= 0x100000001b3ULL;
+        }
+        rng.state = h;
+    } else {
+        rng.state = (uint64_t)time(NULL) ^ 0x9e3779b97f4a7c15ULL;
+    }
+
+    /* Pick a template */
+    const mac_model_template_t *tmpl = &s_mac_templates[prng_next(&rng) % NUM_TEMPLATES];
+
+    snprintf(out_profile->model, sizeof(out_profile->model), "%s", tmpl->model);
+    snprintf(out_profile->board_id, sizeof(out_profile->board_id), "%s", tmpl->board_id);
+    out_profile->chip_id = tmpl->chip_id;
+    snprintf(out_profile->os_version, sizeof(out_profile->os_version), "%s", tmpl->os_version);
+    snprintf(out_profile->os_build, sizeof(out_profile->os_build), "%s", tmpl->os_build);
+    snprintf(out_profile->darwin_version, sizeof(out_profile->darwin_version), "%s", tmpl->darwin_version);
+
+    /* Generate realistic Serial Number: C02 + 4 chars + model_code (11-12 chars) */
+    out_profile->serial_number[0] = 'C';
+    out_profile->serial_number[1] = '0';
+    out_profile->serial_number[2] = '2';
+    for (int i = 0; i < 4; i++) {
+        out_profile->serial_number[3 + i] = prng_alphanum(&rng);
+    }
+    snprintf(out_profile->serial_number + 7, sizeof(out_profile->serial_number) - 7, "%s", tmpl->serial_model_code);
+
+    /* Generate Main Logic Board (MLB) Serial Number: C02 + 14 chars */
+    out_profile->mlb[0] = 'C';
+    out_profile->mlb[1] = '0';
+    out_profile->mlb[2] = '2';
+    for (int i = 0; i < 14; i++) {
+        out_profile->mlb[3 + i] = prng_alphanum(&rng);
+    }
+    out_profile->mlb[17] = '\0';
+
+    /* Generate Hardware Platform UUID: 8-4-4-4-12 */
+    static const char hexchars[] = "0123456789ABCDEF";
+    char uuid_buf[64];
+    int idx = 0;
+    for (int i = 0; i < 36; i++) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            uuid_buf[idx++] = '-';
+        } else if (i == 14) {
+            uuid_buf[idx++] = '4'; // UUID v4
+        } else if (i == 19) {
+            uuid_buf[idx++] = hexchars[(prng_next(&rng) & 0x3) | 0x8]; // variant
+        } else {
+            uuid_buf[idx++] = hexchars[prng_next(&rng) & 0xf];
+        }
+    }
+    uuid_buf[idx] = '\0';
+    snprintf(out_profile->platform_uuid, sizeof(out_profile->platform_uuid), "%s", uuid_buf);
+
+    /* Generate ROM / MAC address with Apple OUI (00:3E:E1) */
+    out_profile->rom[0] = 0x00;
+    out_profile->rom[1] = 0x3e;
+    out_profile->rom[2] = 0xe1;
+    out_profile->rom[3] = (unsigned char)(prng_next(&rng) & 0xff);
+    out_profile->rom[4] = (unsigned char)(prng_next(&rng) & 0xff);
+    out_profile->rom[5] = (unsigned char)(prng_next(&rng) & 0xff);
+
+    /* Build matching X-MMe-Client-Info: <Model> <Mac OS X;VERSION;BUILD> <com.apple.AuthKit/1 (com.apple.dt.Xcode/XCODE)> */
+    snprintf(out_profile->client_info, sizeof(out_profile->client_info),
+             "<%s> <Mac OS X;%s;%s> <com.apple.AuthKit/1 (com.apple.dt.Xcode/%s)>",
+             tmpl->model, tmpl->os_version, tmpl->os_build, tmpl->xcode_version);
+
+    /* Build matching User-Agent: akd/1.0 CFNetwork/VERSION Darwin/VERSION */
+    snprintf(out_profile->user_agent, sizeof(out_profile->user_agent),
+             "akd/1.0 CFNetwork/%s Darwin/%s",
+             tmpl->cfnetwork_version, tmpl->darwin_version);
+
+    return 0;
+}
+
+const mac_hardware_profile_t *mock_iokit_get_current_profile(void) {
+    if (!g_profile_initialized) {
+        mock_iokit_create_profile(&g_active_profile, "default_seed");
+        g_profile_initialized = true;
+    }
+    return &g_active_profile;
 }
 
 /*
  * Helper: Create a CFString-compatible object inside the emulator's virtual heap.
- * CFString struct layout (64-bit):
- *   [0x00] uint64_t isa;
- *   [0x08] uint64_t flags;
- *   [0x10] uint64_t str_ptr;
- *   [0x18] uint64_t length;
  */
 static uint64_t iokit_create_guest_cfstring(darwin_env_t *env, const char *str) {
     if (!env || !str) return 0;
     size_t len = strlen(str);
 
-    /* Allocate C-string in virtual heap */
     uint64_t str_addr = darwin_env_malloc(env, len + 1);
     darwin_env_write_string(env, str_addr, str);
 
-    /* Allocate CFString struct (32 bytes) */
     uint64_t cf_addr = darwin_env_malloc(env, 32);
 
     uint64_t fields[4];
-    fields[0] = 0;                     /* isa (0 or class reference) */
+    fields[0] = 0;                     /* isa */
     fields[1] = GUEST_CFSTRING_FLAGS;  /* flags: ASCII, constant */
     fields[2] = str_addr;              /* buffer pointer */
     fields[3] = (uint64_t)len;         /* length */
@@ -59,20 +220,13 @@ static uint64_t iokit_create_guest_cfstring(darwin_env_t *env, const char *str) 
 
 /*
  * Helper: Create a CFData-compatible object inside the emulator's virtual heap.
- * CFData struct layout (64-bit):
- *   [0x00] uint64_t isa;
- *   [0x08] uint64_t flags;
- *   [0x10] uint64_t bytes_ptr;
- *   [0x18] uint64_t length;
  */
 static uint64_t iokit_create_guest_cfdata(darwin_env_t *env, const void *bytes, size_t len) {
     if (!env || !bytes || len == 0) return 0;
 
-    /* Allocate buffer in virtual heap */
     uint64_t data_addr = darwin_env_malloc(env, len);
     darwin_env_write_mem(env, data_addr, bytes, len);
 
-    /* Allocate CFData struct (32 bytes) */
     uint64_t cf_addr = darwin_env_malloc(env, 32);
 
     uint64_t fields[4];
@@ -91,13 +245,6 @@ static uint64_t iokit_create_guest_cfdata(darwin_env_t *env, const void *bytes, 
 static bool iokit_extract_guest_string(darwin_env_t *env, uint64_t str_ptr, char *out_buf, size_t max_len) {
     if (!env || str_ptr == 0 || !out_buf || max_len == 0) return false;
 
-    /*
-     * Check if str_ptr is a valid CFString structure:
-     *   [+0] isa
-     *   [+8] flags (standard CFString flags typically have 0x07c0 or 0x07d0 in low 16 bits)
-     *   [+16] cstr_ptr
-     *   [+24] length
-     */
     uint64_t flags = 0;
     uint64_t cstr_ptr = 0;
     uint64_t length = 0;
@@ -126,7 +273,6 @@ uint32_t mock_IOServiceGetMatchingService(darwin_env_t *env, uint32_t mainPort, 
     (void)env;
     (void)mainPort;
     (void)matchingDictPtr;
-    /* Return dummy non-zero mach port handle for matching service (1 = IOPlatformExpertDevice) */
     return 1;
 }
 
@@ -141,11 +287,10 @@ uint64_t mock_IORegistryEntryCreateCFProperty(darwin_env_t *env, uint32_t entry,
         return 0;
     }
 
-    const mac_hardware_profile_t *prof = g_profile_initialized ? &g_active_profile : &s_default_macbook_profile;
+    const mac_hardware_profile_t *prof = mock_iokit_get_current_profile();
 
     /* 1. Model property */
     if (strcmp(key, "model") == 0) {
-        /* Usually returned as CFData containing null-terminated string */
         return iokit_create_guest_cfdata(env, prof->model, strlen(prof->model) + 1);
     }
 
@@ -206,7 +351,7 @@ static void hook_IOMasterPort(darwin_env_t *env, uc_engine *uc) {
         uint32_t port = 1;
         darwin_env_write_mem(env, master_port_ptr, &port, sizeof(port));
     }
-    darwin_env_set_return(env, 0); /* KERN_SUCCESS */
+    darwin_env_set_return(env, 0);
 }
 
 static void hook_IOMainPort(darwin_env_t *env, uc_engine *uc) {
@@ -216,12 +361,11 @@ static void hook_IOMainPort(darwin_env_t *env, uc_engine *uc) {
         uint32_t port = 1;
         darwin_env_write_mem(env, main_port_ptr, &port, sizeof(port));
     }
-    darwin_env_set_return(env, 0); /* KERN_SUCCESS */
+    darwin_env_set_return(env, 0);
 }
 
 static void hook_IOServiceMatching(darwin_env_t *env, uc_engine *uc) {
     (void)uc;
-    /* Returns a dummy matching dictionary handle (virtual pointer) */
     uint64_t dummy_dict = darwin_env_malloc(env, 16);
     darwin_env_set_return(env, dummy_dict);
 }
@@ -247,17 +391,17 @@ static void hook_IOServiceGetMatchingServices(darwin_env_t *env, uc_engine *uc) 
         uint32_t dummy_iter = 1;
         darwin_env_write_mem(env, iter_ptr, &dummy_iter, sizeof(dummy_iter));
     }
-    darwin_env_set_return(env, 0); /* KERN_SUCCESS */
+    darwin_env_set_return(env, 0);
 }
 
 static void hook_IOIteratorNext(darwin_env_t *env, uc_engine *uc) {
     (void)uc;
     static int s_iter_count = 0;
     if (s_iter_count++ == 0) {
-        darwin_env_set_return(env, 1); /* Return 1 service first time */
+        darwin_env_set_return(env, 1);
     } else {
         s_iter_count = 0;
-        darwin_env_set_return(env, 0); /* End of iterator */
+        darwin_env_set_return(env, 0);
     }
 }
 
@@ -274,12 +418,12 @@ static void hook_IORegistryEntryCreateCFProperty(darwin_env_t *env, uc_engine *u
 
 static void hook_IOObjectRelease(darwin_env_t *env, uc_engine *uc) {
     (void)uc;
-    darwin_env_set_return(env, 0); /* KERN_SUCCESS */
+    darwin_env_set_return(env, 0);
 }
 
 static void hook_IOObjectRetain(darwin_env_t *env, uc_engine *uc) {
     (void)uc;
-    darwin_env_set_return(env, 0); /* KERN_SUCCESS */
+    darwin_env_set_return(env, 0);
 }
 
 static void hook_IOServiceOpen(darwin_env_t *env, uc_engine *uc) {
@@ -289,22 +433,22 @@ static void hook_IOServiceOpen(darwin_env_t *env, uc_engine *uc) {
         uint32_t conn = 1;
         darwin_env_write_mem(env, conn_ptr, &conn, sizeof(conn));
     }
-    darwin_env_set_return(env, 0); /* KERN_SUCCESS */
+    darwin_env_set_return(env, 0);
 }
 
 static void hook_IOServiceClose(darwin_env_t *env, uc_engine *uc) {
     (void)uc;
-    darwin_env_set_return(env, 0); /* KERN_SUCCESS */
+    darwin_env_set_return(env, 0);
 }
 
 static void hook_IOConnectCallMethod(darwin_env_t *env, uc_engine *uc) {
     (void)uc;
-    darwin_env_set_return(env, 0); /* KERN_SUCCESS */
+    darwin_env_set_return(env, 0);
 }
 
 static void hook_IOConnectCallStructMethod(darwin_env_t *env, uc_engine *uc) {
     (void)uc;
-    darwin_env_set_return(env, 0); /* KERN_SUCCESS */
+    darwin_env_set_return(env, 0);
 }
 
 int mock_iokit_init(darwin_env_t *env, const mac_hardware_profile_t *profile) {
@@ -313,8 +457,8 @@ int mock_iokit_init(darwin_env_t *env, const mac_hardware_profile_t *profile) {
     if (profile) {
         g_active_profile = *profile;
         g_profile_initialized = true;
-    } else {
-        g_active_profile = s_default_macbook_profile;
+    } else if (!g_profile_initialized) {
+        mock_iokit_create_profile(&g_active_profile, NULL);
         g_profile_initialized = true;
     }
 

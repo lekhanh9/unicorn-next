@@ -20,6 +20,8 @@ typedef struct anisette_headers {
     char *x_apple_i_timezone;   /* Timezone string */
     char *x_apple_i_locale;     /* Locale string */
     char *x_apple_i_client_time;/* ISO8601 formatted client timestamp */
+    char *x_mme_client_info;    /* Matching X-MMe-Client-Info */
+    char *user_agent;           /* Matching User-Agent */
 } anisette_headers_t;
 
 /**

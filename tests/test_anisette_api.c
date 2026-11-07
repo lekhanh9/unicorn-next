@@ -23,6 +23,8 @@ int main(void) {
     printf("X-Apple-I-TimeZone:    %s\n", headers.x_apple_i_timezone);
     printf("X-Apple-I-Locale:      %s\n", headers.x_apple_i_locale);
     printf("X-Apple-I-Client-Time: %s\n", headers.x_apple_i_client_time);
+    printf("X-MMe-Client-Info:     %s\n", headers.x_mme_client_info);
+    printf("User-Agent:            %s\n", headers.user_agent);
     printf("============================================================\n\n");
 
     /* Validation */
@@ -34,6 +36,8 @@ int main(void) {
     assert(headers.x_apple_i_locale != NULL && strcmp(headers.x_apple_i_locale, "en_US") == 0);
     assert(headers.x_apple_i_client_time != NULL && strlen(headers.x_apple_i_client_time) == 20);
     assert(headers.x_apple_i_client_time[10] == 'T' && headers.x_apple_i_client_time[19] == 'Z');
+    assert(headers.x_mme_client_info != NULL && headers.x_mme_client_info[0] == '<');
+    assert(headers.user_agent != NULL && strstr(headers.user_agent, "Darwin/") != NULL);
 
     printf("[TEST_ANISETTE] 3. Cleaning up resources...\n");
     macauth_free_anisette_headers(&headers);

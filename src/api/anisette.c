@@ -114,7 +114,7 @@ int macauth_fetch_anisette_headers(anisette_headers_t *out_headers) {
         if (r != 0) return r;
     }
 
-    const mac_hardware_profile_t *prof = mock_iokit_get_default_profile();
+    const mac_hardware_profile_t *prof = mock_iokit_get_current_profile();
 
     /* 1. X-Apple-I-MD-M (Machine ID): Base64 encoded SHA256/hash of hardware UUID */
     unsigned char mdm_raw[32];
@@ -162,6 +162,10 @@ int macauth_fetch_anisette_headers(anisette_headers_t *out_headers) {
     strftime(iso_buf, sizeof(iso_buf), "%Y-%m-%dT%H:%M:%SZ", &gm);
     out_headers->x_apple_i_client_time = strdup(iso_buf);
 
+    /* 8. X-MMe-Client-Info & User-Agent (strictly matching simulated hardware) */
+    out_headers->x_mme_client_info = strdup(prof->client_info);
+    out_headers->user_agent = strdup(prof->user_agent);
+
     return 0;
 }
 
@@ -175,6 +179,8 @@ void macauth_free_anisette_headers(anisette_headers_t *headers) {
     if (headers->x_apple_i_timezone) free(headers->x_apple_i_timezone);
     if (headers->x_apple_i_locale) free(headers->x_apple_i_locale);
     if (headers->x_apple_i_client_time) free(headers->x_apple_i_client_time);
+    if (headers->x_mme_client_info) free(headers->x_mme_client_info);
+    if (headers->user_agent) free(headers->user_agent);
 
     memset(headers, 0, sizeof(anisette_headers_t));
 }

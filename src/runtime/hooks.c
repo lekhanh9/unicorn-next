@@ -8,6 +8,7 @@
 #include <inttypes.h>
 #include <sys/time.h>
 #include <mach/mach_time.h>
+#include "../mock/iokit.h"
 
 #define TRAMPOLINE_SLOT_SIZE 8 /* 2 instructions: NOP; RET */
 
@@ -312,16 +313,18 @@ static void hook_sysctlbyname(darwin_env_t *env, uc_engine *uc) {
     uint64_t int_val = 0;
     bool is_int = false;
 
+    const mac_hardware_profile_t *prof = mock_iokit_get_current_profile();
+
     if (strcmp(name, "hw.model") == 0) {
-        str_val = "MacBookPro18,1";
+        str_val = prof ? prof->model : "MacBookPro18,1";
     } else if (strcmp(name, "hw.machine") == 0) {
         str_val = "arm64";
     } else if (strcmp(name, "kern.osrelease") == 0) {
-        str_val = "22.6.0";
+        str_val = prof ? prof->darwin_version : "22.6.0";
     } else if (strcmp(name, "kern.osversion") == 0) {
-        str_val = "22G90";
+        str_val = prof ? prof->os_build : "22G90";
     } else if (strcmp(name, "kern.osproductversion") == 0) {
-        str_val = "13.5";
+        str_val = prof ? prof->os_version : "13.5";
     } else if (strcmp(name, "hw.ncpu") == 0 || strcmp(name, "hw.physicalcpu") == 0 || strcmp(name, "hw.logicalcpu") == 0) {
         int_val = 10;
         is_int = true;
