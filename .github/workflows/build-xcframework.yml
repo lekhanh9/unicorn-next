@@ -2,8 +2,8 @@ name: Build Unicorn XCFramework
 
 on:
   push:
-    tags:
-      - "*"
+    branches:
+      - master
   workflow_dispatch:
 
 permissions:
@@ -46,8 +46,12 @@ jobs:
           name: Unicorn.xcframework.zip
           path: Unicorn.xcframework.zip
 
-      - name: Release Asset (if tagged)
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: 2.1.4-local
+          name: "Unicorn XCFramework 2.1.4 (Local)"
+          body: |
+            Pre-compiled multiarch Unicorn.xcframework for macOS, iOS, iOS Simulator, tvOS.
+            SHA256: `${{ env.CHECKSUM }}`
           files: Unicorn.xcframework.zip
