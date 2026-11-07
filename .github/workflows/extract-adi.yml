@@ -1,0 +1,90 @@
+name: Extract ADI Binaries
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/extract-adi.yml'
+
+jobs:
+  extract:
+    name: Extract on ${{ matrix.os }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-13
+            arch: x86_64
+          - os: macos-14
+            arch: arm64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install ipsw via Homebrew
+        run: |
+          brew install blacktop/tap/ipsw
+
+      - name: Locate dyld_shared_cache
+        id: locate-dsc
+        run: |
+          echo "Searching for dyld_shared_cache..."
+          DSC=$(find /System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld /System/Library/dyld -name "dyld_shared_cache_*" 2>/dev/null | grep -v "\.symbols" | head -n 1 || true)
+          if [ -z "$DSC" ]; then
+            DSC=$(find / -name "dyld_shared_cache_*" 2>/dev/null | grep -v "\.symbols" | head -n 1 || true)
+          fi
+          echo "Found dyld_shared_cache: $DSC"
+          echo "dsc_path=$DSC" >> "$GITHUB_OUTPUT"
+
+      - name: Extract ADI binaries from dyld_shared_cache and filesystem
+        run: |
+          mkdir -p extracted
+
+          # 1. Search filesystem for standalone dylibs / frameworks
+          echo "=== Searching filesystem for standalone ADI files ==="
+          find /usr/lib /System/Library/PrivateFrameworks /System/Volumes/Preboot/Cryptexes/OS -name "*libadi*" -o -name "*CoreADI*" 2>/dev/null | while read -r f; do
+            if [ -f "$f" ]; then
+              echo "Found standalone file: $f"
+              cp -v "$f" extracted/ || true
+            fi
+          done
+
+          # 2. Extract from dyld_shared_cache using ipsw
+          DSC="${{ steps.locate-dsc.outputs.dsc_path }}"
+          if [ -n "$DSC" ] && [ -f "$DSC" ]; then
+            echo "=== Extracting from dyld_shared_cache ($DSC) ==="
+            ipsw dyld extract "$DSC" libadi.dylib -o extracted || true
+            ipsw dyld extract "$DSC" CoreADI -o extracted || true
+            ipsw dyld extract "$DSC" --dylib libadi -o extracted || true
+            ipsw dyld extract "$DSC" --dylib CoreADI -o extracted || true
+          else
+            echo "Warning: dyld_shared_cache not found!"
+          fi
+
+          # Flatten extracted directory if ipsw created subdirectories
+          find extracted -mindepth 2 -type f -exec cp -v {} extracted/ \; 2>/dev/null || true
+
+      - name: Inspect extracted binaries
+        run: |
+          echo "=== Files in extracted/ ==="
+          ls -la extracted/
+          for bin in extracted/*; do
+            if [ -f "$bin" ]; then
+              echo "----------------------------------------"
+              echo "File: $bin"
+              file "$bin" || true
+              echo "Dependencies (otool -L):"
+              otool -L "$bin" || true
+              echo "Exported symbols (nm -gU):"
+              nm -gU "$bin" 2>/dev/null | head -n 50 || true
+            fi
+          done
+
+      - name: Upload ADI Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: adi-binaries-${{ matrix.os }}-${{ matrix.arch }}
+          path: extracted/
+          if-no-files-found: warn
