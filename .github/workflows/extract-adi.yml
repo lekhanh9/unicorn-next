@@ -21,10 +21,6 @@ jobs:
         run: |
           mkdir -p extracted
 
-          echo "=== CLI Help ==="
-          ipsw dyld --help || true
-          ipsw dyld extract --help || true
-
           # 1. Search filesystem for standalone dylibs / frameworks
           echo "=== Searching filesystem for standalone ADI files ==="
           find /usr/lib /System/Library/PrivateFrameworks /System/Volumes/Preboot/Cryptexes/OS -name "*libadi*" -o -name "*CoreADI*" 2>/dev/null | while read -r f; do
@@ -45,13 +41,14 @@ jobs:
             done
           fi
 
-          # 3. Locate and extract from dyld_shared_cache
-          echo "=== Locating dyld_shared_cache files ==="
+          # 3. Locate primary dyld_shared_cache files
+          echo "=== Locating primary dyld_shared_cache files ==="
           CACHES=()
           PRESETS=(
             "/System/Library/dyld/dyld_shared_cache_arm64e"
             "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e"
             "/System/Library/dyld/dyld_shared_cache_x86_64"
+            "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64"
           )
           for p in "${PRESETS[@]}"; do
             if [ -f "$p" ]; then
@@ -59,7 +56,7 @@ jobs:
             fi
           done
 
-          FOUND_CACHES=$(find /System/Library/dyld /System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld -name "dyld_shared_cache_*" 2>/dev/null | grep -vE "\.(symbols|atlas|map)$" || true)
+          FOUND_CACHES=$(find /System -name "dyld_shared_cache_arm64e" -o -name "dyld_shared_cache_x86_64" 2>/dev/null | grep -vE "\.(symbols|atlas|map|dylddata|dyldlinkedit|dyldreadonly|[0-9]+)$" | sort -u || true)
           for f in $FOUND_CACHES; do
             if [ -f "$f" ]; then
               if [[ ! " ${CACHES[*]} " =~ " ${f} " ]]; then
@@ -68,22 +65,26 @@ jobs:
             fi
           done
 
-          echo "Found valid cache files:"
+          echo "Found primary cache files:"
           for cache in "${CACHES[@]}"; do
             echo " - $cache"
           done
 
+          # 4. Extract dylibs from cache headers
           for cache in "${CACHES[@]}"; do
-            echo "=== Extracting from $cache ==="
-            ipsw dyld extract "$cache" ".*CoreADI.*" -o extracted || true
-            ipsw dyld extract "$cache" ".*libadi.*" -o extracted || true
-            ipsw dyld extract "$cache" ".*AppleDeviceIdentity.*" -o extracted || true
-            ipsw dyld extract "$cache" --dylib ".*CoreADI.*" -o extracted || true
-            ipsw dyld extract "$cache" --dylib ".*libadi.*" -o extracted || true
-            ipsw dyld extract "$cache" --dylib ".*AppleDeviceIdentity.*" -o extracted || true
+            echo "=== Processing cache: $cache ==="
+            head -c 25000000 "$cache" | strings | grep -E "^/(System/Library|usr/lib)/" | grep -iE "adi|authkit|appleid|identity|provision" | sort -u > candidates.txt || true
+            echo "=== Dylibs found in cache header ==="
+            cat candidates.txt || true
+
+            while IFS= read -r lib_path; do
+              [ -z "$lib_path" ] && continue
+              echo "Extracting: $lib_path from $cache"
+              ipsw dyld extract "$cache" "$lib_path" -o extracted || true
+            done < candidates.txt
           done
 
-          # 4. Flatten extracted directory if ipsw created subdirectories
+          # 5. Flatten extracted directory if ipsw created subdirectories
           find extracted -mindepth 2 -type f -exec cp -v {} extracted/ \; 2>/dev/null || true
 
       - name: Inspect extracted binaries
