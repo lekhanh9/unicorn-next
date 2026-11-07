@@ -83,6 +83,7 @@ x64/
 Win32/
 build/
 build_*
+!build_xcframework.sh
 rust_build
 [Bb]in/
 [Oo]bj/
