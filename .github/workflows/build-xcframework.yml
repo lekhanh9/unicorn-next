@@ -41,7 +41,7 @@ jobs:
           UNICORN_LOGGING: "ON"
         run: |
           chmod +x build_xcframework.sh
-          ./build_xcframework.sh
+          bash -x ./build_xcframework.sh
 
       - name: Package XCFramework Bundle
         shell: bash
