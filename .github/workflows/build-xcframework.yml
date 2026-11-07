@@ -41,7 +41,14 @@ jobs:
           UNICORN_LOGGING: "ON"
         run: |
           chmod +x build_xcframework.sh
-          bash -x ./build_xcframework.sh
+          set +e
+          bash -x ./build_xcframework.sh 2>&1 | tee build-xcframework.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            trace=$(tail -n 40 build-xcframework.log | tr '\n' ' ' | sed 's/%/%25/g; s/::/%3A%3A/g')
+            echo "::error title=XCFramework build trace::$trace"
+          fi
+          exit "$status"
 
       - name: Package XCFramework Bundle
         shell: bash
