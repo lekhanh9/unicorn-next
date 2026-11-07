@@ -1,14 +1,12 @@
-name: Extract ADI Binaries
+name: xcode
 
 on:
-  workflow_dispatch:
   push:
-    paths:
-      - '.github/workflows/extract-adi.yml'
+    branches: [ "main", "master" ]
+  workflow_dispatch:
 
 jobs:
-  extract:
-    name: Extract on macos-latest
+  build:
     runs-on: macos-latest
 
     steps:
