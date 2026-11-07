@@ -41,19 +41,33 @@ jobs:
             fi
           done
 
-          # 2. Extract from dyld_shared_cache using ipsw
+          # 2. Search /Applications/Xcode.app
+          if [ -d "/Applications/Xcode.app" ]; then
+            echo "=== Searching /Applications/Xcode.app ==="
+            find /Applications/Xcode.app -iname "*adi*" 2>/dev/null | while read -r f; do
+              if [ -f "$f" ]; then
+                echo "Found in Xcode: $f"
+                cp -v "$f" extracted/ 2>/dev/null || true
+              fi
+            done
+          fi
+
+          # 3. Extract from dyld_shared_cache using ipsw
           DSC="${{ steps.locate-dsc.outputs.dsc_path }}"
           if [ -n "$DSC" ] && [ -f "$DSC" ]; then
-            echo "=== Extracting from dyld_shared_cache ($DSC) ==="
-            ipsw dyld extract "$DSC" libadi.dylib -o extracted || true
-            ipsw dyld extract "$DSC" CoreADI -o extracted || true
-            ipsw dyld extract "$DSC" --dylib libadi -o extracted || true
-            ipsw dyld extract "$DSC" --dylib CoreADI -o extracted || true
+            echo "=== Searching and extracting from dyld_shared_cache ($DSC) ==="
+            MATCHES=$(ipsw dyld list "$DSC" | grep -iE "adi|appledeviceidentity" || true)
+            echo "Matched dylibs in cache:"
+            echo "$MATCHES"
+            for lib in $MATCHES; do
+              echo "Extracting: $lib"
+              ipsw dyld extract "$DSC" "$lib" -o extracted || true
+            done
           else
             echo "Warning: dyld_shared_cache not found!"
           fi
 
-          # Flatten extracted directory if ipsw created subdirectories
+          # 4. Flatten extracted directory if ipsw created subdirectories
           find extracted -mindepth 2 -type f -exec cp -v {} extracted/ \; 2>/dev/null || true
 
       - name: Inspect extracted binaries
