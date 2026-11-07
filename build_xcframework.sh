@@ -90,16 +90,7 @@ XCFRAMEWORK_ARGS=(
   -library "${OUTPUT_DIR}/ios_device/libunicorn.a" -headers "${ROOT_DIR}/include"
 )
 
-# Optional tvOS if SDK exists on host
-if xcrun -sdk appletvsimulator --show-sdk-path >/dev/null 2>&1 && xcrun -sdk appletvos --show-sdk-path >/dev/null 2>&1; then
-    build_slice "tvOS Simulator"     appletvsimulator  "arm64;x86_64"  "-DUNICORN_ENABLE_TCI=ON"                     "tvos_sim"
-    build_slice "tvOS Device"        appletvos         "arm64"         "-DUNICORN_ENABLE_TCI=ON -DCONFIG_INT128=ON"  "tvos_device"
-    XCFRAMEWORK_ARGS+=(
-      -library "${OUTPUT_DIR}/tvos_sim/libunicorn.a" -headers "${ROOT_DIR}/include"
-      -library "${OUTPUT_DIR}/tvos_device/libunicorn.a" -headers "${ROOT_DIR}/include"
-    )
-fi
-
+# AnisetteKit targets iOS and macOS; tvOS slices are not required here.
 xcodebuild -create-xcframework "${XCFRAMEWORK_ARGS[@]}" -output "${XCFRAMEWORK_PATH}"
 
 rm -rf "${OUTPUT_DIR}"
