@@ -61,8 +61,8 @@ darwin_env_t *darwin_env_create(void) {
     darwin_env_write_mem(env, env->tls_addr, &env->tls_addr, 8);
     uc_reg_write(env->uc, UC_ARM64_REG_TPIDR_EL0, &env->tls_addr);
 
-    /* 4. Setup Hook Trampoline page: 64KB at 0x800000000000 */
-    env->hook_trampoline_base = 0x800000000000ULL;
+    /* 4. Setup Hook Trampoline page: 64KB at 0x500000000000 */
+    env->hook_trampoline_base = 0x500000000000ULL;
     env->hook_trampoline_size = 0x10000ULL; /* 64 KB */
     err = uc_mem_map(env->uc, env->hook_trampoline_base, env->hook_trampoline_size,
                      UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC);

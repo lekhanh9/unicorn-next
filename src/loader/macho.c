@@ -50,12 +50,56 @@
  *    This allows seamless dynamic translation and JIT execution on iOS 16+.
  */
 #include <mach/mach.h>
+#include <mach-o/dyld.h>
 #include <libkern/OSCacheControl.h>
+
+#ifndef MAP_JIT
+#define MAP_JIT 0x0800
+#endif
+
+static void *(*g_orig_mmap)(void *, size_t, int, int, int, off_t) = mmap;
+
+static void *patched_unicorn_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t offset) {
+    if (flags & MAP_JIT) {
+        flags &= ~MAP_JIT;
+        if (prot & PROT_EXEC) {
+            prot &= ~PROT_EXEC;
+            prot |= (PROT_READ | PROT_WRITE);
+        }
+    }
+    return g_orig_mmap(addr, len, prot, flags, fd, offset);
+}
+
+static void patch_libunicorn_got_mmap(void) {
+    uint32_t count = _dyld_image_count();
+    intptr_t unicorn_slide = 0;
+    bool found = false;
+
+    for (uint32_t i = 0; i < count; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (strstr(name, "libunicorn")) {
+            unicorn_slide = _dyld_get_image_vmaddr_slide(i);
+            found = true;
+            break;
+        }
+    }
+
+    if (!found) return;
+
+    /* GOT slot for mmap is at offset 0xf60158 in libunicorn.2.dylib */
+    uintptr_t got_slot = (uintptr_t)unicorn_slide + 0xf60158ULL;
+    uintptr_t page_addr = got_slot & ~0x3fffULL;
+    mprotect((void *)page_addr, 0x4000, PROT_READ | PROT_WRITE);
+
+    void *replacement = (void *)patched_unicorn_mmap;
+    memcpy((void *)got_slot, &replacement, sizeof(void *));
+}
 
 static struct sigaction g_prev_sigbus;
 static bool g_unicorn_compat_initialized = false;
 
 static void unicorn_sigbus_handler(int sig, siginfo_t *info, void *ucontext_raw) {
+#if defined(__arm64__) || defined(__aarch64__)
     ucontext_t *uc = (ucontext_t *)ucontext_raw;
     uint32_t esr = uc->uc_mcontext->__es.__esr;
     uint32_t ec = (esr >> 26) & 0x3f;
@@ -86,6 +130,7 @@ static void unicorn_sigbus_handler(int sig, siginfo_t *info, void *ucontext_raw)
             }
         }
     }
+#endif
 
     /* Fallback to previous handler if not handled */
     if (g_prev_sigbus.sa_flags & SA_SIGINFO) {
@@ -105,7 +150,10 @@ void macho_init_unicorn_compat(void) {
     if (g_unicorn_compat_initialized) return;
     g_unicorn_compat_initialized = true;
 
-    /* Install SIGBUS handler for ARM64 W^X JIT switching */
+    /* 1. Patch GOT of libunicorn to strip MAP_JIT on iOS 16+ */
+    patch_libunicorn_got_mmap();
+
+    /* 2. Install SIGBUS handler for ARM64 W^X JIT switching */
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = unicorn_sigbus_handler;

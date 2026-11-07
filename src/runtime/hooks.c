@@ -29,6 +29,8 @@ static void hook_code_dispatch(uc_engine *uc, uint64_t address, uint32_t size, v
     darwin_hook_manager_t *mgr = env->hooks;
     for (size_t i = 0; i < mgr->count; i++) {
         if (mgr->entries[i].addr == address) {
+            uint64_t lr = darwin_env_get_reg(env, UC_ARM64_REG_LR);
+            printf("[HOOK_CALL] -> %s (LR=0x%llx)\n", mgr->entries[i].name, (unsigned long long)lr);
             if (mgr->entries[i].handler) {
                 mgr->entries[i].handler(env, uc);
             }
@@ -45,6 +47,7 @@ static void hook_malloc(darwin_env_t *env, uc_engine *uc) {
     (void)uc;
     uint64_t size = darwin_env_get_reg(env, UC_ARM64_REG_X0);
     uint64_t ptr = darwin_env_malloc(env, (size_t)size);
+    printf("[HOOK_MALLOC] size=%llu -> ptr=0x%llx\n", (unsigned long long)size, (unsigned long long)ptr);
     darwin_env_set_return(env, ptr);
 }
 
@@ -387,6 +390,220 @@ static void hook_os_log_noop(darwin_env_t *env, uc_engine *uc) {
     darwin_env_set_return(env, 0);
 }
 
+#include <mach/mach.h>
+extern mach_port_t bootstrap_port;
+extern kern_return_t bootstrap_look_up(mach_port_t, const char *, mach_port_t *);
+extern mach_port_t mig_get_reply_port(void);
+
+static mach_port_t g_host_adid_port = MACH_PORT_NULL;
+static bool g_host_adid_tried = false;
+
+static mach_port_t get_host_adid_port(void) {
+    if (!g_host_adid_tried) {
+        g_host_adid_tried = true;
+        kern_return_t kr = bootstrap_look_up(bootstrap_port, "com.apple.adid", &g_host_adid_port);
+        if (kr == KERN_SUCCESS) {
+            printf("[MACH_MSG] Successfully connected to host com.apple.adid (port=0x%x)!\n", g_host_adid_port);
+        } else {
+            printf("[MACH_MSG] Host com.apple.adid not available (kr=%d), using local synthesis.\n", kr);
+        }
+    }
+    return g_host_adid_port;
+}
+
+static void hook_mach_msg(darwin_env_t *env, uc_engine *uc) {
+    (void)uc;
+    uint64_t msg_ptr = darwin_env_get_reg(env, UC_ARM64_REG_X0);
+    uint32_t option = (uint32_t)darwin_env_get_reg(env, UC_ARM64_REG_X1);
+    uint32_t send_size = (uint32_t)darwin_env_get_reg(env, UC_ARM64_REG_X2);
+    uint32_t rcv_size = (uint32_t)darwin_env_get_reg(env, UC_ARM64_REG_X3);
+
+    mach_msg_header_t hdr;
+    darwin_env_read_mem(env, msg_ptr, &hdr, sizeof(hdr));
+    printf("[MACH_MSG] option=0x%x, send_size=%u, rcv_size=%u, remote_port=0x%x, msgh_id=%d (0x%x)\n",
+           option, send_size, rcv_size, hdr.msgh_remote_port, hdr.msgh_id, hdr.msgh_id);
+
+    uint8_t payload[64] = {0};
+    size_t payload_len = (send_size > sizeof(hdr)) ? (send_size - sizeof(hdr)) : 0;
+    if (payload_len > sizeof(payload)) payload_len = sizeof(payload);
+    darwin_env_read_mem(env, msg_ptr + sizeof(hdr), payload, payload_len);
+    printf("[MACH_MSG] Payload: ");
+    for (size_t i = 0; i < payload_len && i < 24; i++) {
+        printf("%02x ", payload[i]);
+    }
+    printf("\n");
+
+    /* If it was a send+receive request, synthesize standard MIG reply */
+    if (option & 2) { /* MACH_RCV_MSG */
+        if (hdr.msgh_id == 1200) {
+            /* Complex MIG reply for com.apple.adid.midchanged */
+            typedef struct {
+                mach_msg_header_t Head;
+                mach_msg_body_t Body;
+                struct {
+                    uint64_t address;
+                    uint8_t deallocate;
+                    uint8_t copy;
+                    uint8_t pad1;
+                    uint8_t type;
+                    uint32_t size;
+                } __attribute__((packed)) ool;
+                uint32_t NDR[2];
+                uint32_t count;
+            } __attribute__((packed)) mig_reply_1200_t;
+
+            mig_reply_1200_t reply;
+            memset(&reply, 0, sizeof(reply));
+            reply.Head.msgh_bits = 0x80000012; /* MACH_MSGH_BITS_COMPLEX */
+            reply.Head.msgh_size = sizeof(reply); /* 56 */
+            reply.Head.msgh_remote_port = 0;
+            reply.Head.msgh_local_port = 0;
+            reply.Head.msgh_id = 1300;
+            reply.Body.msgh_descriptor_count = 1;
+
+            struct {
+                mach_msg_body_t Body;
+                struct {
+                    uint64_t address;
+                    uint8_t deallocate;
+                    uint8_t copy;
+                    uint8_t pad1;
+                    uint8_t type;
+                    uint32_t size;
+                } __attribute__((packed)) ool;
+                uint32_t NDR[2];
+                uint32_t count;
+            } __attribute__((packed)) req_body;
+            darwin_env_read_mem(env, msg_ptr + sizeof(mach_msg_header_t), &req_body, sizeof(req_body));
+
+            printf("[MACH_MSG 1200] req: in_addr=0x%llx, in_size=%u, count=%u\n",
+                   (unsigned long long)req_body.ool.address, req_body.ool.size, req_body.count);
+
+            mach_port_t real_port = get_host_adid_port();
+            bool forwarded = false;
+            if (real_port != MACH_PORT_NULL) {
+                mach_port_t real_reply_port = mig_get_reply_port();
+                uint8_t host_req_buf[64] = {0};
+                uint32_t req_sz = req_body.ool.size ? req_body.ool.size : 20;
+                if (req_sz > sizeof(host_req_buf)) req_sz = sizeof(host_req_buf);
+                if (req_body.ool.address && req_sz > 0) {
+                    darwin_env_read_mem(env, req_body.ool.address, host_req_buf, req_sz);
+                }
+
+                struct {
+                    mach_msg_header_t Head;
+                    mach_msg_body_t Body;
+                    struct {
+                        void *address;
+                        uint8_t deallocate;
+                        uint8_t copy;
+                        uint8_t pad1;
+                        uint8_t type;
+                        uint32_t size;
+                    } __attribute__((packed)) ool;
+                    uint32_t NDR[2];
+                    uint32_t count;
+                } __attribute__((packed)) real_req;
+
+                memset(&real_req, 0, sizeof(real_req));
+                real_req.Head.msgh_bits = 0x80001513;
+                real_req.Head.msgh_size = sizeof(real_req);
+                real_req.Head.msgh_remote_port = real_port;
+                real_req.Head.msgh_local_port = real_reply_port;
+                real_req.Head.msgh_id = 1200;
+                real_req.Body.msgh_descriptor_count = 1;
+                real_req.ool.address = host_req_buf;
+                real_req.ool.type = 1;
+                real_req.ool.copy = 1;
+                real_req.ool.size = req_sz;
+                real_req.count = req_sz;
+
+                uint8_t real_reply_bytes[128] = {0};
+                mach_msg_return_t mr = mach_msg(
+                    (mach_msg_header_t *)&real_req,
+                    MACH_SEND_MSG | MACH_RCV_MSG,
+                    sizeof(real_req),
+                    sizeof(real_reply_bytes),
+                    real_reply_port,
+                    1000,
+                    MACH_PORT_NULL
+                );
+
+                if (mr == MACH_MSG_SUCCESS) {
+                    mach_msg_header_t *rh = (mach_msg_header_t *)real_reply_bytes;
+                    printf("[MACH_MSG 1200] Host adid replied: bits=0x%x, size=%u, id=%d\n",
+                           rh->msgh_bits, rh->msgh_size, rh->msgh_id);
+                    if (rh->msgh_bits & 0x80000000) {
+                        mig_reply_1200_t *r_rep = (void *)real_reply_bytes;
+                        uint32_t out_len = r_rep->count;
+                        uint64_t reply_buf = darwin_env_malloc(env, out_len);
+                        if (r_rep->ool.address && out_len > 0) {
+                            darwin_env_write_mem(env, reply_buf, (const void *)r_rep->ool.address, out_len);
+                        }
+
+                        reply.ool.address = reply_buf;
+                        reply.ool.deallocate = 0;
+                        reply.ool.copy = 0;
+                        reply.ool.pad1 = 0;
+                        reply.ool.type = 1;
+                        reply.ool.size = out_len;
+                        reply.NDR[0] = 0;
+                        reply.NDR[1] = 0;
+                        reply.count = out_len;
+
+                        darwin_env_write_mem(env, msg_ptr, &reply, sizeof(reply));
+                        forwarded = true;
+                        printf("[MACH_MSG 1200] Successfully forwarded host reply (len=%u) to Unicorn!\n", out_len);
+                    }
+                } else {
+                    printf("[MACH_MSG 1200] Host adid mach_msg returned 0x%x, using fallback.\n", mr);
+                }
+            }
+
+            if (!forwarded) {
+                /* Synthesize exact adid daemon reply (4 bytes: 0xffff4ffb = -45061) */
+                uint32_t out_len = 4;
+                uint64_t reply_buf = darwin_env_malloc(env, out_len);
+                uint8_t temp[4] = {0xff, 0xff, 0x4f, 0xfb};
+                darwin_env_write_mem(env, reply_buf, temp, out_len);
+
+                reply.ool.address = reply_buf;
+                reply.ool.deallocate = 0;
+                reply.ool.copy = 0;
+                reply.ool.pad1 = 0;
+                reply.ool.type = 1; /* MACH_MSG_OOL_DESCRIPTOR */
+                reply.ool.size = out_len;
+                reply.NDR[0] = 0;
+                reply.NDR[1] = 0;
+                reply.count = out_len;
+
+                darwin_env_write_mem(env, msg_ptr, &reply, sizeof(reply));
+                printf("[MACH_MSG 1200] Synthesized adid daemon fallback reply (size=%zu): msgh_id=1300, code=-45061\n",
+                       sizeof(reply));
+            }
+        } else {
+            struct {
+                mach_msg_header_t Head;
+                uint32_t NDR[2];
+                int32_t RetCode;
+                uint8_t dummy[64];
+            } reply;
+            memset(&reply, 0, sizeof(reply));
+            reply.Head.msgh_bits = 0x12;
+            reply.Head.msgh_size = (rcv_size < sizeof(reply)) ? rcv_size : sizeof(reply);
+            reply.Head.msgh_remote_port = 0;
+            reply.Head.msgh_local_port = 0;
+            reply.Head.msgh_id = hdr.msgh_id + 100; /* MIG reply convention */
+            reply.RetCode = 0; /* KERN_SUCCESS */
+
+            darwin_env_write_mem(env, msg_ptr, &reply, (rcv_size < sizeof(reply)) ? rcv_size : sizeof(reply));
+            printf("[MACH_MSG] Synthesized MIG reply for msgh_id=%d, RetCode=0!\n", reply.Head.msgh_id);
+        }
+    }
+
+    darwin_env_set_return(env, 0);
+}
+
 /* ========================================================================= */
 /*                           Hook Manager Core                               */
 /* ========================================================================= */
@@ -453,6 +670,8 @@ int darwin_hooks_init(darwin_env_t *env) {
     darwin_hooks_register(env, "os_log_create", hook_os_log_create);
     darwin_hooks_register(env, "_os_log_impl", hook_os_log_noop);
     darwin_hooks_register(env, "os_log_type_enabled", hook_os_log_noop);
+    darwin_hooks_register(env, "mach_msg", hook_mach_msg);
+    darwin_hooks_register(env, "_mach_msg", hook_mach_msg);
 
     return 0;
 }
