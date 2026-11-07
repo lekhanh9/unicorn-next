@@ -1,0 +1,53 @@
+name: Build Unicorn XCFramework
+
+on:
+  push:
+    tags:
+      - "*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: xcframework-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  xcframework:
+    name: Build Unicorn XCFramework
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: "true"
+
+      - name: Build XCFramework
+        env:
+          UNICORN_LOGGING: "ON"
+        run: |
+          chmod +x build_xcframework.sh
+          ./build_xcframework.sh
+
+      - name: Package XCFramework Bundle
+        shell: bash
+        run: |
+          cd build
+          zip -r ../Unicorn.xcframework.zip Unicorn.xcframework
+          cd ..
+          CHECKSUM=$(shasum -a 256 Unicorn.xcframework.zip | awk '{print $1}')
+          echo "CHECKSUM=$CHECKSUM" | tee -a $GITHUB_ENV
+          echo "SHA256 Checksum: $CHECKSUM"
+
+      - name: Upload XCFramework Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Unicorn.xcframework.zip
+          path: Unicorn.xcframework.zip
+
+      - name: Release Asset (if tagged)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Unicorn.xcframework.zip
