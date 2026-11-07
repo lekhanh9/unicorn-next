@@ -97,3 +97,6 @@ zig-out/
 ##################
 
 .idea/
+
+binaries/
+deps/
