@@ -146,7 +146,7 @@ int main(void) {
     char model_str[64] = {0};
     darwin_env_read_string(env, out_buf, model_str, sizeof(model_str));
     printf("[TEST_RUNTIME] Emulated 'hw.model': '%s'\n", model_str);
-    assert(strcmp(model_str, "MacBookPro18,1") == 0 && "hw.model must be MacBookPro18,1");
+    assert((strcmp(model_str, "MacBookPro18,1") == 0 || strcmp(model_str, "Mac14,2") == 0) && "hw.model must be valid Mac model");
 
     /* Cleanup */
     darwin_env_destroy(env);

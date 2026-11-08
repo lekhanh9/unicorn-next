@@ -192,8 +192,13 @@ int macauth_fetch_anisette_headers(anisette_headers_t *out_headers) {
         }
     }
 
+    if (g_macauth.img_akd && (!got_real_adi || !out_headers->x_apple_i_md)) {
+        /* Real akd is loaded but unprovisioned -> return ADI_ERROR_NOT_PROVISIONED (-45061) */
+        return -45061;
+    }
+
     if (!got_real_adi) {
-        /* Fallback: Hardware profile based Machine ID and token */
+        /* Fallback: Hardware profile based Machine ID and token (mock-only mode) */
         unsigned char mdm_raw[32];
         for (size_t i = 0; i < sizeof(mdm_raw); i++) {
             mdm_raw[i] = (unsigned char)(prof->platform_uuid[i % strlen(prof->platform_uuid)] ^ (i * 0x3d));

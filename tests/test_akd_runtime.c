@@ -104,6 +104,22 @@ static bool hook_unmapped_mem(uc_engine *uc, uc_mem_type type, uint64_t address,
     return false; // Stop emulation
 }
 
+static void hook_trace_math(uc_engine *uc, uint64_t address, uint32_t size, void *user_data) {
+    (void)size; (void)user_data;
+    uint64_t x13=0, x15=0, x16=0, x24=0, x11=0, x14=0, x12=0, x0=0;
+    uc_reg_read(uc, UC_ARM64_REG_X13, &x13);
+    uc_reg_read(uc, UC_ARM64_REG_X15, &x15);
+    uc_reg_read(uc, UC_ARM64_REG_X16, &x16);
+    uc_reg_read(uc, UC_ARM64_REG_X24, &x24);
+    uc_reg_read(uc, UC_ARM64_REG_X11, &x11);
+    uc_reg_read(uc, UC_ARM64_REG_X14, &x14);
+    uc_reg_read(uc, UC_ARM64_REG_X12, &x12);
+    uc_reg_read(uc, UC_ARM64_REG_X0, &x0);
+    printf("[MATH_CHECK] at PC=0x%" PRIx64 ":\n", address);
+    printf("  w13=0x%x, w15=0x%x, w16=0x%x, w24=0x%x, w11=0x%x, w14=0x%x, w12=0x%x, w0=0x%x\n",
+           (uint32_t)x13, (uint32_t)x15, (uint32_t)x16, (uint32_t)x24, (uint32_t)x11, (uint32_t)x14, (uint32_t)x12, (uint32_t)x0);
+}
+
 int main(void) {
     macho_init_unicorn_compat();
 
@@ -174,12 +190,14 @@ int main(void) {
     darwin_env_set_reg(env, UC_ARM64_REG_SP, new_sp);
     darwin_env_set_reg(env, UC_ARM64_REG_LR, env->magic_exit_addr);
 
-    uc_hook hh_unmapped, hh_err, hh_mig, hh_x20, hh_status;
+    uc_hook hh_unmapped, hh_err, hh_mig, hh_x20, hh_status, hh_math1, hh_math2;
     uc_hook_add(env->uc, &hh_unmapped, UC_HOOK_MEM_READ_UNMAPPED | UC_HOOK_MEM_WRITE_UNMAPPED | UC_HOOK_MEM_FETCH_UNMAPPED, hook_unmapped_mem, NULL, 1, 0);
     uc_hook_add(env->uc, &hh_err, UC_HOOK_CODE, hook_code_err, NULL, 0x1000a6bc4ULL, 0x1000a6bc4ULL);
     uc_hook_add(env->uc, &hh_mig, UC_HOOK_CODE, hook_mig_entry, NULL, 0x100091c3cULL, 0x100091c3cULL);
     uc_hook_add(env->uc, &hh_x20, UC_HOOK_CODE, hook_trace_x20, NULL, 0x1000a7000ULL, 0x1000a8f10ULL);
     uc_hook_add(env->uc, &hh_status, UC_HOOK_CODE, hook_trace_status_read, NULL, 0x1000a81ecULL, 0x1000a81ecULL);
+    uc_hook_add(env->uc, &hh_math1, UC_HOOK_CODE, hook_trace_math, NULL, 0x1000a83c8ULL, 0x1000a83c8ULL);
+    uc_hook_add(env->uc, &hh_math2, UC_HOOK_CODE, hook_trace_math, NULL, 0x1000a84d4ULL, 0x1000a84d4ULL);
 
     printf("[TEST_AKD] 7. Calling ADIGenerateOTPCode at 0x1000a50dc in Unicorn...\n");
     uint64_t entry_addr = 0x1000a50dcULL;

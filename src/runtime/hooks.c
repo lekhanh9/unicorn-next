@@ -484,21 +484,22 @@ static void hook_mach_msg(darwin_env_t *env, uc_engine *uc) {
             printf("[MACH_MSG 1200] req: in_addr=0x%llx, in_size=%u, count=%u\n",
                    (unsigned long long)req_body.ool.address, req_body.ool.size, req_body.count);
 
+            uint8_t host_req_buf[64] = {0};
+            uint32_t req_sz = req_body.ool.size ? req_body.ool.size : 20;
+            if (req_sz > sizeof(host_req_buf)) req_sz = sizeof(host_req_buf);
+            if (req_body.ool.address && req_sz > 0) {
+                darwin_env_read_mem(env, req_body.ool.address, host_req_buf, req_sz);
+                printf("[MACH_MSG 1200] in_buf (len=%u): ", req_sz);
+                for (uint32_t i = 0; i < req_sz && i < 48; i++) {
+                    printf("%02x ", host_req_buf[i]);
+                }
+                printf("\n");
+            }
+
             mach_port_t real_port = get_host_adid_port();
             bool forwarded = false;
             if (real_port != MACH_PORT_NULL) {
                 mach_port_t real_reply_port = mig_get_reply_port();
-                uint8_t host_req_buf[64] = {0};
-                uint32_t req_sz = req_body.ool.size ? req_body.ool.size : 20;
-                if (req_sz > sizeof(host_req_buf)) req_sz = sizeof(host_req_buf);
-                if (req_body.ool.address && req_sz > 0) {
-                    darwin_env_read_mem(env, req_body.ool.address, host_req_buf, req_sz);
-                    printf("[MACH_MSG 1200] in_buf (len=%u): ", req_sz);
-                    for (uint32_t i = 0; i < req_sz && i < 48; i++) {
-                        printf("%02x ", host_req_buf[i]);
-                    }
-                    printf("\n");
-                }
 
                 struct {
                     mach_msg_header_t Head;
@@ -571,10 +572,17 @@ static void hook_mach_msg(darwin_env_t *env, uc_engine *uc) {
             }
 
             if (!forwarded) {
-                /* Synthesize exact adid daemon reply (4 bytes: 0xffff4ffb = -45061) */
-                uint32_t out_len = 4;
+                /* Synthesize exact adid daemon reply (echo in_buf with status 0) */
+                uint32_t out_len = (req_sz >= 20) ? req_sz : 20;
                 uint64_t reply_buf = darwin_env_malloc(env, out_len);
-                uint8_t temp[4] = {0xff, 0xff, 0x4f, 0xfb};
+                uint8_t temp[64] = {0};
+                if (req_sz > 0) {
+                    memcpy(temp, host_req_buf, (req_sz < sizeof(temp)) ? req_sz : sizeof(temp));
+                }
+                /* Byte 0..3: status = 0 (SUCCESS) */
+                temp[0] = 0; temp[1] = 0; temp[2] = 0; temp[3] = 0;
+                /* Byte 4..7: count/length = 8 */
+                temp[4] = 0; temp[5] = 0; temp[6] = 0; temp[7] = 0x08;
                 darwin_env_write_mem(env, reply_buf, temp, out_len);
 
                 reply.ool.address = reply_buf;
