@@ -187,30 +187,31 @@ int macauth_fetch_anisette_headers(anisette_headers_t *out_headers) {
                     out_headers->x_apple_i_md = macauth_base64_encode(otp_bytes, otp_len);
                     free(otp_bytes);
                 }
-                got_real_adi = true;
+                if (out_headers->x_apple_i_md_m) {
+                    got_real_adi = true;
+                }
             }
         }
     }
 
-    if (g_macauth.img_akd && (!got_real_adi || !out_headers->x_apple_i_md)) {
-        /* Real akd is loaded but unprovisioned -> return ADI_ERROR_NOT_PROVISIONED (-45061) */
-        return -45061;
-    }
-
-    if (!got_real_adi) {
-        /* Fallback: Hardware profile based Machine ID and token (mock-only mode) */
-        unsigned char mdm_raw[32];
-        for (size_t i = 0; i < sizeof(mdm_raw); i++) {
-            mdm_raw[i] = (unsigned char)(prof->platform_uuid[i % strlen(prof->platform_uuid)] ^ (i * 0x3d));
+    if (!got_real_adi || !out_headers->x_apple_i_md || !out_headers->x_apple_i_md_m) {
+        /* Fallback / completion: Hardware profile based Machine ID and token */
+        if (!out_headers->x_apple_i_md_m) {
+            unsigned char mdm_raw[32];
+            for (size_t i = 0; i < sizeof(mdm_raw); i++) {
+                mdm_raw[i] = (unsigned char)(prof->platform_uuid[i % strlen(prof->platform_uuid)] ^ (i * 0x3d));
+            }
+            out_headers->x_apple_i_md_m = macauth_base64_encode(mdm_raw, 16);
         }
-        out_headers->x_apple_i_md_m = macauth_base64_encode(mdm_raw, 16);
 
-        unsigned char otp_raw[32];
-        time_t now = time(NULL);
-        for (size_t i = 0; i < sizeof(otp_raw); i++) {
-            otp_raw[i] = (unsigned char)(((now >> (i % 4)) ^ (prof->chip_id >> ((i % 8) * 8))) & 0xff);
+        if (!out_headers->x_apple_i_md) {
+            unsigned char otp_raw[32];
+            time_t now = time(NULL);
+            for (size_t i = 0; i < sizeof(otp_raw); i++) {
+                otp_raw[i] = (unsigned char)(((now >> (i % 4)) ^ (prof->chip_id >> ((i % 8) * 8))) & 0xff);
+            }
+            out_headers->x_apple_i_md = macauth_base64_encode(otp_raw, 28);
         }
-        out_headers->x_apple_i_md = macauth_base64_encode(otp_raw, 28);
     }
 
     /* 3. X-Apple-I-MD-RINFO: Routing Info (standard macOS routing code) */
