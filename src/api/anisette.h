@@ -51,6 +51,35 @@ int macauth_fetch_anisette_headers(anisette_headers_t *out_headers);
  */
 void macauth_free_anisette_headers(anisette_headers_t *headers);
 
+/**
+ * Run ADIProvisioningStart in the emulated akd engine.
+ *
+ * @param spim Server Provisioning Information Message (can be NULL if none).
+ * @param spim_len Length of spim buffer.
+ * @param out_cpim Allocated client data output buffer (caller frees).
+ * @param out_cpim_len Length of out_cpim.
+ * @param out_session Returned session identifier.
+ * @return 0 on success, or negative error code.
+ */
+int macauth_start_provision(const uint8_t *spim, uint32_t spim_len, uint8_t **out_cpim, uint32_t *out_cpim_len, uint32_t *out_session);
+
+/**
+ * Run ADIProvisioningEnd in the emulated akd engine.
+ *
+ * @param session Session identifier from start_provision.
+ * @param ptm Server response PTM buffer.
+ * @param ptm_len Length of ptm buffer.
+ * @param out_routing Allocated routing info buffer (caller frees).
+ * @param out_routing_len Length of routing info.
+ * @return 0 on success, or negative error code.
+ */
+int macauth_end_provision(uint32_t session, const uint8_t *ptm, uint32_t ptm_len, uint8_t **out_routing, uint32_t *out_routing_len);
+
+/**
+ * Encode raw bytes to Base64 string. Caller frees result with free().
+ */
+char *macauth_base64_encode(const unsigned char *src, size_t len);
+
 #ifdef __cplusplus
 }
 #endif

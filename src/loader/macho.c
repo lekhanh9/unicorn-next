@@ -787,3 +787,141 @@ void macho_dump_info(const macho_image_t *img) {
     printf("Symbols:     %zu loaded\n", img->num_symbols);
     printf("====================================================\n");
 }
+
+#if __has_include("../runtime/darwin_env.h")
+#include "../runtime/darwin_env.h"
+#include "../runtime/hooks.h"
+#else
+#include "darwin_env.h"
+#include "hooks.h"
+#endif
+
+#ifndef LC_DYLD_CHAINED_FIXUPS
+#define LC_DYLD_CHAINED_FIXUPS 0x80000034
+#endif
+
+/* Chained Fixups Structs */
+struct dyld_chained_fixups_header {
+    uint32_t fixups_version;
+    uint32_t starts_offset;
+    uint32_t imports_offset;
+    uint32_t symbols_offset;
+    uint32_t imports_count;
+    uint32_t imports_format;
+    uint32_t symbols_format;
+};
+
+static void hook_generic_fixup_stub(darwin_env_t *env, uc_engine *uc) {
+    (void)uc;
+    darwin_env_set_return(env, 0);
+}
+
+int macho_apply_chained_fixups(darwin_env_t *env, macho_image_t *img) {
+    if (!env || !img || !img->file_data) return -1;
+
+    const uint8_t *slice_data = img->file_data + img->slice_offset;
+    const struct mach_header_64 *hdr = (const struct mach_header_64 *)slice_data;
+
+    uint32_t offset = sizeof(struct mach_header_64);
+    uint32_t dataoff = 0;
+
+    for (uint32_t i = 0; i < hdr->ncmds; i++) {
+        const struct load_command *lc = (const struct load_command *)(slice_data + offset);
+        if (lc->cmd == LC_DYLD_CHAINED_FIXUPS) {
+            const struct linkedit_data_command *ld = (const struct linkedit_data_command *)lc;
+            dataoff = ld->dataoff;
+            break;
+        }
+        offset += lc->cmdsize;
+    }
+
+    if (dataoff == 0) {
+        return 0; /* No chained fixups */
+    }
+
+    const struct dyld_chained_fixups_header *fhdr = 
+        (const struct dyld_chained_fixups_header *)(slice_data + dataoff);
+
+    const char *symbols_pool = (const char *)(slice_data + dataoff + fhdr->symbols_offset);
+    const uint32_t *imports_data = (const uint32_t *)(slice_data + dataoff + fhdr->imports_offset);
+
+    char **import_names = (char **)calloc(fhdr->imports_count, sizeof(char *));
+    for (uint32_t i = 0; i < fhdr->imports_count; i++) {
+        uint32_t name_off = imports_data[i] >> 9;
+        import_names[i] = strdup(symbols_pool + name_off);
+    }
+
+    /* Allocate stack_chk_guard in virtual heap */
+    uint64_t stack_guard_ptr = darwin_env_malloc(env, 16);
+    uint64_t guard_val = 0x595a5b5c5d5e5f60ULL;
+    darwin_env_write_mem(env, stack_guard_ptr, &guard_val, 8);
+
+    /* Allocate dummy CFBoolean/objects in heap */
+    uint64_t dummy_obj = darwin_env_malloc(env, 64);
+
+    int rebased_count = 0;
+    int bound_count = 0;
+
+    /* Scan data sections (__DATA_CONST and __DATA) */
+    const macho_segment_t *data_const = macho_find_segment(img, "__DATA_CONST");
+    const macho_segment_t *data_seg = macho_find_segment(img, "__DATA");
+
+    const macho_segment_t *segs[2] = {data_const, data_seg};
+    for (int s = 0; s < 2; s++) {
+        if (!segs[s]) continue;
+        uint64_t seg_start = segs[s]->vmaddr;
+        uint64_t seg_end = segs[s]->vmaddr + segs[s]->vmsize;
+
+        for (uint64_t chain_vm = seg_start; chain_vm < seg_end; chain_vm += 8) {
+            uint64_t val = 0;
+            if (darwin_env_read_mem(env, chain_vm, &val, 8) != 0) continue;
+
+            uint64_t bind = (val >> 63) & 1;
+            uint64_t auth = (val >> 62) & 1;
+            uint64_t next_off = (val >> 51) & 0x7ff;
+
+            if (bind) {
+                uint32_t ordinal = (uint32_t)(val & 0xffffff);
+                int64_t addend = (int8_t)((val >> 24) & 0xff);
+
+                if (ordinal < fhdr->imports_count) {
+                    const char *sname = import_names[ordinal];
+                    uint64_t resolved = 0;
+                    if (strstr(sname, "stack_chk_guard")) {
+                        resolved = stack_guard_ptr;
+                    } else if (sname[0] == '_' && sname[1] == 'k') {
+                        /* Constants / CFStrings */
+                        resolved = dummy_obj;
+                    } else {
+                        uint64_t hook_addr = darwin_hooks_find(env, sname);
+                        if (!hook_addr) {
+                            hook_addr = darwin_hooks_register(env, sname, hook_generic_fixup_stub);
+                        }
+                        resolved = hook_addr + (uint64_t)addend;
+                    }
+                    darwin_env_write_mem(env, chain_vm, &resolved, 8);
+                    bound_count++;
+                }
+            } else if (auth || next_off) {
+                uint64_t target = 0;
+                if (auth) {
+                    target = val & 0xffffffff;
+                } else {
+                    target = (val & 0x7ffffffffffULL) | (((val >> 43) & 0xffULL) << 56);
+                }
+                uint64_t resolved = 0x100000000ULL + target;
+                darwin_env_write_mem(env, chain_vm, &resolved, 8);
+                rebased_count++;
+            }
+        }
+    }
+
+    for (uint32_t i = 0; i < fhdr->imports_count; i++) {
+        free(import_names[i]);
+    }
+    free(import_names);
+
+    printf("[FIXUPS] Full sweep resolved %d rebases and %d imports!\n", rebased_count, bound_count);
+    return 0;
+}
+

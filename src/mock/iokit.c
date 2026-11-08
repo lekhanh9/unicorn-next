@@ -1,5 +1,9 @@
 #include "iokit.h"
+#if __has_include("../runtime/hooks.h")
 #include "../runtime/hooks.h"
+#else
+#include "hooks.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>

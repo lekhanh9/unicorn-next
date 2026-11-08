@@ -187,6 +187,17 @@ const macho_section_t *macho_find_section(const macho_image_t *img, const char *
  */
 void macho_dump_info(const macho_image_t *img);
 
+/**
+ * Apply dyld chained fixups (LC_DYLD_CHAINED_FIXUPS) on the mapped Mach-O image.
+ * Resolves rebases and binds imports to Darwin hook trampolines or stubs.
+ *
+ * @param env Darwin execution environment.
+ * @param img Loaded Mach-O image.
+ * @return 0 on success, negative error code on failure.
+ */
+struct darwin_env;
+int macho_apply_chained_fixups(struct darwin_env *env, macho_image_t *img);
+
 #ifdef __cplusplus
 }
 #endif

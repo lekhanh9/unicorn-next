@@ -1,14 +1,12 @@
 #include "hooks.h"
 #include "darwin_env.h"
+#if __has_include("../loader/macho.h")
 #include "../loader/macho.h"
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <inttypes.h>
-#include <sys/time.h>
-#include <mach/mach_time.h>
 #include "../mock/iokit.h"
+#else
+#include "macho.h"
+#include "iokit.h"
+#endif
 
 #define TRAMPOLINE_SLOT_SIZE 8 /* 2 instructions: NOP; RET */
 
@@ -488,6 +486,11 @@ static void hook_mach_msg(darwin_env_t *env, uc_engine *uc) {
                 if (req_sz > sizeof(host_req_buf)) req_sz = sizeof(host_req_buf);
                 if (req_body.ool.address && req_sz > 0) {
                     darwin_env_read_mem(env, req_body.ool.address, host_req_buf, req_sz);
+                    printf("[MACH_MSG 1200] in_buf (len=%u): ", req_sz);
+                    for (uint32_t i = 0; i < req_sz && i < 48; i++) {
+                        printf("%02x ", host_req_buf[i]);
+                    }
+                    printf("\n");
                 }
 
                 struct {
