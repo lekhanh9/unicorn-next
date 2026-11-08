@@ -8,6 +8,13 @@
 #include "iokit.h"
 #endif
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <inttypes.h>
+#include <sys/time.h>
+#include <mach/mach_time.h>
+
 #define TRAMPOLINE_SLOT_SIZE 8 /* 2 instructions: NOP; RET */
 
 /*

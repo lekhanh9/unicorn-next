@@ -5,7 +5,11 @@
 #include <stdbool.h>
 #include <unicorn/unicorn.h>
 #include "darwin_env.h"
+#if __has_include("../loader/macho.h")
 #include "../loader/macho.h"
+#else
+#include "macho.h"
+#endif
 
 #ifdef __cplusplus
 extern "C" {

@@ -1,6 +1,10 @@
 #include "darwin_env.h"
 #include "hooks.h"
+#if __has_include("../loader/macho.h")
 #include "../loader/macho.h"
+#else
+#include "macho.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>

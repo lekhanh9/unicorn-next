@@ -3,7 +3,11 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#if __has_include("../runtime/darwin_env.h")
 #include "../runtime/darwin_env.h"
+#else
+#include "darwin_env.h"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
